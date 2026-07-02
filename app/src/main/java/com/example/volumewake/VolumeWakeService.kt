@@ -3,119 +3,96 @@ package com.example.volumewake
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
-import androidx.media.VolumeProviderCompat
 
 /**
- * Service này CHỈ tạo MediaSession khi màn hình đang tắt, và HUỶ HẲN
- * (release) session đó ngay khi màn hình sáng lại -> không để bất kỳ session
- * nào tồn tại trong bộ nhớ hệ thống lúc màn sáng, tránh việc một số bảng âm
- * lượng của hãng máy (One UI, MIUI...) vẫn hiện slider dù isActive = false.
+ * Service này chỉ tạo MediaSession MỘT LẦN DUY NHẤT khi service khởi động,
+ * và giữ nó sống suốt vòng đời service (không tạo/huỷ theo từng lần tắt/bật
+ * màn hình nữa).
+ *
+ * KHÔNG dùng setPlaybackToRemote()/VolumeProviderCompat vì đó chính là API
+ * để vẽ thanh trượt volume tuỳ chỉnh -> đó là nguyên nhân sinh ra nhiều
+ * slider. Thay vào đó ta chỉ đăng ký callback để "chặn" (consume) sự kiện
+ * phím âm lượng khi màn hình tắt, không khai báo bất kỳ playback/remote
+ * volume nào cả -> hệ thống không có lý do gì để vẽ UI volume panel.
  */
 class VolumeWakeService : Service() {
 
-    private var mediaSession: MediaSessionCompat? = null
+    private lateinit var mediaSession: MediaSessionCompat
     private lateinit var powerManager: PowerManager
-    private var currentVolume = 5
-    private val maxVolume = 10
 
     companion object {
         private const val CHANNEL_ID = "volume_wake_channel"
         private const val NOTIFICATION_ID = 1
     }
 
-    private val screenStateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                Intent.ACTION_SCREEN_OFF -> createSessionIfNeeded()
-                Intent.ACTION_SCREEN_ON -> destroySessionIfExists()
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         startForegroundServiceWithNotification()
-        registerScreenStateReceiver()
-
-        // Nếu service khởi động ngay lúc màn hình đang tắt sẵn
-        if (!powerManager.isInteractive) {
-            createSessionIfNeeded()
-        }
+        createPersistentSession()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_NOT_STICKY
+        // KHÔNG tạo lại session ở đây -> tránh nhân bản
+        return START_STICKY
     }
 
-    private fun createSessionIfNeeded() {
-        if (mediaSession != null) return
+    private fun createPersistentSession() {
+        mediaSession = MediaSessionCompat(this, "VolumeWakeSession").apply {
+            setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS)
 
-        val session = MediaSessionCompat(this, "VolumeWakeSession")
+            // Giữ STATE_NONE - không khai báo đang phát media thật,
+            // tránh hệ thống coi đây là 1 audio stream cần hiển thị UI
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setState(PlaybackStateCompat.STATE_NONE, 0, 1f)
+                    .build()
+            )
 
-        val volumeProvider = object : VolumeProviderCompat(
-            VOLUME_CONTROL_ABSOLUTE,
-            maxVolume,
-            currentVolume
-        ) {
-            override fun onAdjustVolume(direction: Int) {
-                if (direction != 0) wakeUpScreen()
-            }
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(
+                        Intent.EXTRA_KEY_EVENT
+                    ) ?: return false
 
-            override fun onSetVolumeTo(volume: Int) {
-                currentVolume = volume
-                this.currentVolume = volume
-            }
+                    val isVolumeKey = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+                            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+
+                    if (isVolumeKey && event.action == KeyEvent.ACTION_DOWN) {
+                        if (!powerManager.isInteractive) {
+                            wakeUpScreen()
+                        }
+                        // return true = tự tay xử lý xong, hệ thống KHÔNG
+                        // chỉnh volume nữa -> KHÔNG có lý do gì để vẽ panel
+                        return true
+                    }
+                    return false
+                }
+            })
+
+            // active đúng 1 lần, không toggle theo screen on/off nữa
+            isActive = true
         }
-
-        session.setPlaybackToRemote(volumeProvider)
-
-        val stateBuilder = PlaybackStateCompat.Builder()
-            .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE)
-            .setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f)
-        session.setPlaybackState(stateBuilder.build())
-
-        session.isActive = true
-        mediaSession = session
-    }
-
-    private fun destroySessionIfExists() {
-        mediaSession?.let {
-            it.isActive = false
-            it.release()
-        }
-        mediaSession = null
-    }
-
-    private fun registerScreenStateReceiver() {
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_SCREEN_OFF)
-        }
-        registerReceiver(screenStateReceiver, filter)
     }
 
     private fun wakeUpScreen() {
-        if (!powerManager.isInteractive) {
-            @Suppress("DEPRECATION")
-            val wakeLock = powerManager.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-                        PowerManager.ACQUIRE_CAUSES_WAKEUP or
-                        PowerManager.ON_AFTER_RELEASE,
-                "VolumeWake:WakeLock"
-            )
-            wakeLock.acquire(3000)
-        }
+        @Suppress("DEPRECATION")
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+            "VolumeWake:WakeLock"
+        )
+        wakeLock.acquire(3000)
     }
 
     private fun startForegroundServiceWithNotification() {
@@ -154,12 +131,10 @@ class VolumeWakeService : Service() {
     }
 
     private fun cleanupAndStop() {
-        try {
-            unregisterReceiver(screenStateReceiver)
-        } catch (e: IllegalArgumentException) {
-            // chưa đăng ký, bỏ qua
+        if (::mediaSession.isInitialized) {
+            mediaSession.isActive = false
+            mediaSession.release()
         }
-        destroySessionIfExists()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
