@@ -3,8 +3,10 @@ package com.example.volumewake
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -14,18 +16,18 @@ import androidx.core.app.NotificationCompat
 import androidx.media.VolumeProviderCompat
 
 /**
- * Service này giữ một MediaSession luôn ở trạng thái "đang phát" (PLAYING).
- * Khi một MediaSession đang active + playing, hệ điều hành Android sẽ định
- * tuyến sự kiện phím Volume vật lý vào VolumeProvider của session đó
- * (thay vì chỉnh âm lượng chuông/media mặc định), kể cả khi màn hình đang tắt,
- * miễn là service (và do đó session) vẫn còn sống.
+ * Service này giữ một MediaSession có thể "đang phát" (PLAYING) để cướp phím
+ * Volume vật lý -> dùng để bật màn hình khi đang tắt.
  *
- * Mỗi lần callback onAdjustVolume() được gọi tức là người dùng vừa bấm phím
- * Volume Up/Down -> ta xin WakeLock để bật màn hình trong vài giây.
+ * ĐIỂM QUAN TRỌNG: session chỉ được set isActive = true khi MÀN HÌNH ĐANG TẮT.
+ * Khi màn hình sáng, session bị tắt (isActive = false) để phím Volume hoạt
+ * động bình thường (chỉnh nhạc/chuông/media như mặc định), tránh việc app
+ * chiếm quyền điều khiển volume suốt ngày.
  */
 class VolumeWakeService : Service() {
 
     private lateinit var mediaSession: MediaSessionCompat
+    private lateinit var powerManager: PowerManager
     private var currentVolume = 5
     private val maxVolume = 10
 
@@ -34,10 +36,32 @@ class VolumeWakeService : Service() {
         private const val NOTIFICATION_ID = 1
     }
 
+    // Lắng nghe sự kiện màn hình bật/tắt để bật/tắt MediaSession tương ứng
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    // Màn hình vừa tắt -> kích hoạt session để bắt phím Volume
+                    if (::mediaSession.isInitialized) {
+                        mediaSession.isActive = true
+                    }
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    // Màn hình vừa sáng -> tắt session để volume hoạt động bình thường
+                    if (::mediaSession.isInitialized) {
+                        mediaSession.isActive = false
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         startForegroundServiceWithNotification()
         setupMediaSession()
+        registerScreenStateReceiver()
     }
 
     private fun setupMediaSession() {
@@ -69,11 +93,19 @@ class VolumeWakeService : Service() {
             .setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f)
         mediaSession.setPlaybackState(stateBuilder.build())
 
-        mediaSession.isActive = true
+        // Chỉ active ngay từ đầu nếu màn hình đang tắt sẵn (trường hợp hiếm khi start service)
+        mediaSession.isActive = !powerManager.isInteractive
+    }
+
+    private fun registerScreenStateReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        registerReceiver(screenStateReceiver, filter)
     }
 
     private fun wakeUpScreen() {
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!powerManager.isInteractive) {
             @Suppress("DEPRECATION")
             val wakeLock = powerManager.newWakeLock(
@@ -111,6 +143,11 @@ class VolumeWakeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(screenStateReceiver)
+        } catch (e: IllegalArgumentException) {
+            // receiver có thể chưa được đăng ký, bỏ qua
+        }
         if (::mediaSession.isInitialized) {
             mediaSession.isActive = false
             mediaSession.release()
