@@ -18,7 +18,15 @@
         android:id="@+id/switchService"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Bật đánh thức màn hình bằng nút Volume"
+        android:text="Bật đánh thức bằng nút Volume"
+        android:textSize="16sp"/>
+
+    <Switch
+        android:id="@+id/switchDoubleTap"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="Bật gõ đúp vào thân máy để đánh thức (tốn pin hơn)"
         android:textSize="16sp"/>
 
     <TextView
@@ -33,7 +41,15 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="40dp"
-        android:text="Lưu ý: một số hãng (Xiaomi, Oppo, Vivo, Samsung...) hay tự kill app nền. Hãy vào Cài đặt pin và tắt tối ưu hoá pin cho app này để tính năng hoạt động ổn định."
+        android:text="Lưu ý: gõ đúp là gõ 2 cái vào MẶT LƯNG/CẠNH máy (không phải chạm màn hình, vì màn tắt sẽ không nhận cảm ứng). Cần bật 'Bật đánh thức bằng nút Volume' trước, sau đó mới bật thêm gõ đúp. Nếu bị trigger nhầm liên tục hoặc không nhận gõ, báo lại để mình chỉnh độ nhạy."
+        android:textSize="12sp"
+        android:gravity="center"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Một số hãng (Xiaomi, Oppo, Vivo, Samsung...) hay tự kill app nền. Hãy vào Cài đặt pin và tắt tối ưu hoá pin cho app này."
         android:textSize="12sp"
         android:gravity="center"/>
 
